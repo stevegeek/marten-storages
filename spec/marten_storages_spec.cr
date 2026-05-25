@@ -89,6 +89,34 @@ describe MartenStorages do
           .map(&.variation_kind)
         kinds.should eq ["large", "thumbnail"]
       end
+
+      it "cleans up tempfiles even when variant computation raises (review §2)" do
+        doc = Document.create!(title: "cleanup-on-raise")
+        # Make a non-image fixture inline (vips can't read this).
+        path = ::File.join(::Dir.tempdir, "not-an-image.pdf")
+        ::File.write(path, "this is plainly not a vips-readable image\n")
+        begin
+          before = Dir.glob(::File.join(::Dir.tempdir, "variant_thumbnail_*")).size
+
+          SpecHelpers.uploaded_file(path, content_type: "application/pdf") do |uploaded|
+            MartenStorages::Service.attach(
+              model: DocumentAttachment,
+              record: doc,
+              name: "doc",
+              uploaded_file: uploaded,
+              variants: {"thumbnail" => {max_dimension: 200}},
+            )
+          end
+
+          # vips fails on the non-image, the rescue handles it — and the
+          # ensure cleans up `temp_path` despite the rescue. Net tempfile
+          # count for our prefix should not grow.
+          after = Dir.glob(::File.join(::Dir.tempdir, "variant_thumbnail_*")).size
+          after.should eq before
+        ensure
+          ::File.delete?(path)
+        end
+      end
     end
 
     describe ".find_one" do

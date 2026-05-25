@@ -96,7 +96,9 @@ module MartenStorages
 
     # Pipe the original through `VariantPipeline.resize` (libvips) and save
     # a new Attachment row pointing at the original. Falls back to a no-op
-    # if the original isn't a vips-readable image.
+    # if the original isn't a vips-readable image. Any other error
+    # (DB connection lost, disk full, unique-constraint violation,
+    # a bug in this method) propagates to the caller.
     private def compute_and_save_variant(
       model : T.class,
       original : T,
@@ -108,51 +110,60 @@ module MartenStorages
 
       source_name = original_file.name.not_nil!
       temp_path = ::File.tempname("variant_#{kind}_", ::File.extname(source_name))
+      variant_path : ::String? = nil
 
-      # original_file.open delegates to the storage backend and returns an IO.
-      # No block form — close it manually.
-      source_io = original_file.open
       begin
-        ::File.open(temp_path, "wb") { |f| ::IO.copy(source_io, f) }
+        # original_file.open delegates to the storage backend and returns an IO.
+        # No block form — close it manually.
+        source_io = original_file.open
+        begin
+          ::File.open(temp_path, "wb") { |f| ::IO.copy(source_io, f) }
+        ensure
+          source_io.close
+        end
+
+        format = MartenStorages.configuration.default_variant_format
+        variant_path = VariantPipeline.resize(temp_path, spec, format: format)
+
+        base = ::File.basename(source_name, ::File.extname(source_name))
+        variant_filename = "#{base}_#{kind}.#{format}"
+        content_type = format == "jpg" || format == "jpeg" ? "image/jpeg" : "image/#{format}"
+
+        content_disposition = "form-data; name=\"file\"; filename=\"#{variant_filename}\""
+        part_headers = ::HTTP::Headers{
+          "Content-Disposition" => content_disposition,
+          "Content-Type"        => content_type,
+        }
+
+        ::File.open(variant_path, "rb") do |variant_io|
+          part = ::HTTP::FormData::Part.new(headers: part_headers, body: variant_io)
+          uploaded = ::Marten::HTTP::UploadedFile.new(part)
+
+          variant = model.new(
+            name: original.name,
+            variation_kind: kind,
+            content_type: content_type,
+            byte_size: ::File.size(variant_path).to_i64,
+          )
+          variant.record = original.record!
+          variant.variant_of = original
+          variant.file = uploaded
+          variant.save!
+        end
+      rescue ex : ::Vips::VipsException | ::File::NotFoundError
+        # Original isn't a vips-readable image (e.g. PDF, plain text) or
+        # the underlying storage file vanished between save! and our open
+        # (already-deleted race). Skip variant generation silently. The
+        # original is still saved.
+        ::Marten::Log.warn { "Skipping variant '#{kind}' for attachment #{original.pk}: #{ex.message}" }
       ensure
-        source_io.close
+        # Always clean up tempfiles on success *and* failure — otherwise
+        # `Dir.tempdir` fills up over time on a busy box (review §2).
+        ::File.delete?(temp_path)
+        if vp = variant_path
+          ::File.delete?(vp)
+        end
       end
-
-      format = MartenStorages.configuration.default_variant_format
-      variant_path = VariantPipeline.resize(temp_path, spec, format: format)
-
-      base = ::File.basename(source_name, ::File.extname(source_name))
-      variant_filename = "#{base}_#{kind}.#{format}"
-      content_type = format == "jpg" || format == "jpeg" ? "image/jpeg" : "image/#{format}"
-
-      content_disposition = "form-data; name=\"file\"; filename=\"#{variant_filename}\""
-      part_headers = ::HTTP::Headers{
-        "Content-Disposition" => content_disposition,
-        "Content-Type"        => content_type,
-      }
-
-      ::File.open(variant_path, "rb") do |variant_io|
-        part = ::HTTP::FormData::Part.new(headers: part_headers, body: variant_io)
-        uploaded = ::Marten::HTTP::UploadedFile.new(part)
-
-        variant = model.new(
-          name: original.name,
-          variation_kind: kind,
-          content_type: content_type,
-          byte_size: ::File.size(variant_path).to_i64,
-        )
-        variant.record = original.record!
-        variant.variant_of = original
-        variant.file = uploaded
-        variant.save!
-      end
-
-      ::File.delete?(temp_path)
-      ::File.delete?(variant_path)
-    rescue ex
-      # Original isn't a vips-readable image (e.g. PDF, plain text); skip
-      # variant generation silently. The original is still saved.
-      ::Marten::Log.warn { "Skipping variant '#{kind}' for attachment #{original.pk}: #{ex.message}" }
     end
   end
 end
