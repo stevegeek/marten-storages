@@ -21,11 +21,28 @@ class DocumentAttachment < Marten::Model
 
   with_timestamp_fields
 
+  # Test-only toggle used by spec/marten_storages_spec.cr to simulate a
+  # non-vips, non-NotFoundError exception raised *inside*
+  # `compute_and_save_variant`'s begin block (review STR-N1). When set
+  # to `true`, the `before_save` callback below raises a `RuntimeError`
+  # whenever a variant row is about to be saved — exercising the narrow
+  # rescue's "let it through" path. Defaults to `false`; the spec flips
+  # it on per-example and resets it in an `ensure`.
+  class_property raise_on_variant_save : Bool = false
+
+  before_save :maybe_raise_on_variant_save
+
   def original?
     variant_of_id.nil?
   end
 
   def variant?
     !original?
+  end
+
+  private def maybe_raise_on_variant_save : Nil
+    return unless self.class.raise_on_variant_save
+    return if variation_kind.nil?
+    raise RuntimeError.new("simulated non-vips failure inside compute_and_save_variant")
   end
 end

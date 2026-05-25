@@ -47,12 +47,13 @@ module MartenStorages
   end
 
   # Class-level configuration store with a defensive initialization
-  # mutex (review §20). Crystal's class-var initialisation is
-  # technically thread-safe at module load time, but lazy-initializing
-  # via `||=` in a class method is *not* — the Mutex below makes the
-  # first-touch race explicitly safe. In practice `configure { ... }`
-  # runs once from the boot fiber, but the cost of an uncontended
-  # mutex acquire per `configuration` call is negligible.
+  # mutex (review §20). The Mutex guards `Configuration.new` against
+  # duplicate concurrent first-touch initialisation. Crystal's class-var
+  # initialisation under contention is unspecified; the Mutex is
+  # belt-and-braces in practice. Boot-only configure pattern
+  # (recommended) avoids the race entirely — in practice
+  # `configure { ... }` runs once from the boot fiber, but the cost is
+  # one uncontended mutex acquire per call.
   @@configuration : Configuration? = nil
   @@configuration_mutex = Mutex.new
 

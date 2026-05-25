@@ -48,6 +48,10 @@ module MartenStorages
         new(max_dimension: tuple[:max_dimension])
       end
 
+      def self.from(tuple : NamedTuple(max_dimension: Int32, format: String)) : Spec
+        new(max_dimension: tuple[:max_dimension], format: tuple[:format])
+      end
+
       def self.from(spec : Spec) : Spec
         spec
       end

@@ -134,6 +134,25 @@ module MartenStorages
       )
     end
 
+    # Back-compat overload: accept the NamedTuple shape with an explicit
+    # `format:` field (`{"thumbnail" => {max_dimension: 200, format: "webp"}}`)
+    # so call sites that need per-variant format overrides can stay on
+    # the literal NamedTuple form without dropping to the Struct API.
+    def attach(
+      model : T.class,
+      record : ::Marten::DB::Model,
+      name : ::String,
+      uploaded_file : ::Marten::HTTP::UploadedFile,
+      variants : ::Hash(::String, NamedTuple(max_dimension: Int32, format: String)),
+      content_type : ::String? = nil,
+    ) : T forall T
+      normalized = variants.transform_values { |tuple| VariantSpec.from(tuple) }
+      attach(
+        model: model, record: record, name: name, uploaded_file: uploaded_file,
+        variants: normalized, content_type: content_type,
+      )
+    end
+
     # Resolve a single attachment for a record + name (e.g. Book cover).
     # Returns the most recently created original (non-variant).
     #

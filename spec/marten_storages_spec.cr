@@ -117,6 +117,29 @@ describe MartenStorages do
         DocumentAttachment.filter(variant_of_id: original.pk).count.should eq 1
       end
 
+      it "accepts the NamedTuple shape with `format:` for back-compat (STR-N3)" do
+        # STR-N3: the original back-compat overload only accepted
+        # `{max_dimension: Int32}` — passing the literal shape with an
+        # extra `format:` field was a compile error. The added overload
+        # routes through the same `Spec.from` normalisation.
+        doc = Document.create!(title: "namedtuple-format")
+        path = SpecHelpers.make_test_jpeg(width: 800, height: 600)
+
+        original = SpecHelpers.uploaded_file(path) do |uploaded|
+          MartenStorages::Service.attach(
+            model: DocumentAttachment,
+            record: doc,
+            name: "image",
+            uploaded_file: uploaded,
+            variants: {"thumb" => {max_dimension: 200, format: "webp"}},
+          )
+        end
+
+        variant = DocumentAttachment.filter(variant_of_id: original.pk).first.not_nil!
+        variant.content_type.should eq "image/webp"
+        variant.file.name.not_nil!.should end_with(".webp")
+      end
+
       it "honours the per-spec `format:` override (review §14)" do
         doc = Document.create!(title: "per-spec-format")
         path = SpecHelpers.make_test_jpeg(width: 800, height: 600)
@@ -221,15 +244,65 @@ describe MartenStorages do
         end
       end
 
-      it "propagates non-vips errors (e.g. bad kind) instead of swallowing them as `not a vips image` (review §1)" do
-        # Narrow rescue check: `kind`-validation raises `ArgumentError`,
-        # which is not in the narrow `Vips::VipsException |
-        # File::NotFoundError` rescue list — so it must propagate to the
-        # caller instead of being logged-and-swallowed (the pre-§1
-        # bare-rescue behaviour).
-        doc = Document.create!(title: "bad-kind-propagates")
+      it "propagates non-vips errors raised inside compute_and_save_variant's begin block (review §1 / STR-N1)" do
+        # STR-N1: the narrow rescue
+        # (`rescue ex : Vips::VipsException | File::NotFoundError`)
+        # must NOT swallow other exception classes raised *inside* the
+        # begin block. Mutation-verify by widening to `rescue ex` — this
+        # spec must fail (the RuntimeError gets swallowed and the
+        # attach completes instead of propagating).
+        #
+        # We trigger the failure via a `before_save` callback on
+        # `DocumentAttachment` that raises `RuntimeError` whenever a
+        # variant row is about to save (toggled by a class-level flag).
+        # The variant `save!` is inside the begin block at the bottom of
+        # `compute_and_save_variant`, so this exercises the exact path
+        # the narrow rescue is supposed to leave alone.
+        doc = Document.create!(title: "non-vips-inside-begin")
         path = SpecHelpers.make_test_jpeg
 
+        DocumentAttachment.raise_on_variant_save = true
+        begin
+          expect_raises(RuntimeError, /simulated non-vips failure/) do
+            SpecHelpers.uploaded_file(path) do |uploaded|
+              MartenStorages::Service.attach(
+                model: DocumentAttachment,
+                record: doc,
+                name: "image",
+                uploaded_file: uploaded,
+                variants: {"thumbnail" => {max_dimension: 200}},
+              )
+            end
+          end
+        ensure
+          DocumentAttachment.raise_on_variant_save = false
+        end
+
+        # Whole attach should have rolled back (review §7) — no original
+        # nor variant rows for this doc.
+        DocumentAttachment.filter(record_type: "Document", record_id: doc.pk).count.should eq 0
+      end
+
+      it "[KNOWN LIMITATION] leaks on-disk media files when attach rolls back mid-loop (STR-N2)" do
+        # STR-N2: documented limitation locked in by spec. The DB
+        # transaction rolls back rows, but storage-backend writes that
+        # already happened (original file + any variant files saved
+        # before the failing variant) are *not* unwound. If/when an
+        # `ensure`-block storage cleanup pass lands inside `attach`'s
+        # transaction rescue path, flip the `be_true` assertions below
+        # to `be_false` and update the spec name.
+        doc = Document.create!(title: "leak-on-rollback")
+        path = SpecHelpers.make_test_jpeg
+
+        # Snapshot file count before the attach so we can assert the
+        # leak count precisely.
+        attachments_dir = ::File.join(MEDIA_ROOT, "attachments")
+        before_count = ::Dir.exists?(attachments_dir) ? ::Dir.children(attachments_dir).size : 0
+
+        # First variant ("a-thumb") succeeds — its file is written.
+        # Second variant ("bad/kind") fails kind validation, raising
+        # ArgumentError *after* the original + first variant files have
+        # already landed in media storage.
         expect_raises(ArgumentError, /kind must match/) do
           SpecHelpers.uploaded_file(path) do |uploaded|
             MartenStorages::Service.attach(
@@ -237,10 +310,23 @@ describe MartenStorages do
               record: doc,
               name: "image",
               uploaded_file: uploaded,
-              variants: {"bad/kind" => {max_dimension: 200}},
+              variants: {
+                "a-thumb"  => {max_dimension: 200},
+                "bad/kind" => {max_dimension: 400},
+              },
             )
           end
         end
+
+        # DB rolled back (review §7).
+        DocumentAttachment.filter(record_type: "Document", record_id: doc.pk).count.should eq 0
+
+        # …but the on-disk files for the original + first variant are
+        # NOT cleaned up. This is the limitation: at least one orphan
+        # file should remain in MEDIA_ROOT/attachments/ that has no
+        # corresponding DB row.
+        after_count = ::Dir.exists?(attachments_dir) ? ::Dir.children(attachments_dir).size : 0
+        (after_count > before_count).should be_true
       end
 
       it "cleans up tempfiles even when variant computation raises (review §2)" do
