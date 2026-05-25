@@ -12,6 +12,11 @@ require "./test_project/models/**"
 # so attachment file paths don't collide across runs.
 MEDIA_ROOT = Path["./tmp/marten_storages_spec_media"].expand.to_s
 
+# Per-spec scratch dir for `make_test_jpeg` / non-image fixtures. Lives
+# under the project tmp/ rather than `Dir.tempdir` so a long spec run
+# doesn't pollute the system temp directory (review §21).
+SPEC_FIXTURES_TMP = Path["./tmp/marten_storages_spec_fixtures"].expand.to_s
+
 Marten.configure :test do |config|
   config.secret_key = "__insecure_spec_secret_#{Random::Secure.random_bytes(16).hexstring}__"
   config.log_level = ::Log::Severity::None
@@ -31,6 +36,8 @@ Spec.before_each do
   MartenStorages.reset_configuration!
   ::FileUtils.rm_rf(MEDIA_ROOT)
   ::Dir.mkdir_p(MEDIA_ROOT)
+  ::FileUtils.rm_rf(SPEC_FIXTURES_TMP)
+  ::Dir.mkdir_p(SPEC_FIXTURES_TMP)
 end
 
 # Helpers for building a Marten::HTTP::UploadedFile from a path on disk —
@@ -56,13 +63,25 @@ module SpecHelpers
   end
 
   # Generate a small JPEG on disk via vips (so we know it's a valid image
-  # and roughly 800x600). Returns the absolute path.
+  # and roughly 800x600). Returns the absolute path. Files land under
+  # `SPEC_FIXTURES_TMP` (project-local) and are cleaned up by the
+  # `before_each` hook above (review §21).
   def make_test_jpeg(filename : String = "sample.jpg", width : Int32 = 800, height : Int32 = 600) : String
-    path = ::File.join(::Dir.tempdir, filename)
+    path = ::File.join(SPEC_FIXTURES_TMP, filename)
     # Black-and-white image, sized to make the variant pipeline have
     # work to do (max_dimension=200 will scale).
     image = ::Vips::Image.black(width, height)
     image.write_to_file(path)
+    path
+  end
+
+  # Generate a tiny non-image fixture (plain text masquerading as a PDF
+  # by extension). Used to exercise the `compute_and_save_variant`
+  # `Vips::VipsException` branch — vips cannot read this so variants are
+  # skipped silently while the original still saves.
+  def make_test_non_image(filename : String = "not-an-image.pdf") : String
+    path = ::File.join(SPEC_FIXTURES_TMP, filename)
+    ::File.write(path, "this is plainly not a vips-readable image\n")
     path
   end
 end

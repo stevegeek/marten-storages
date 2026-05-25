@@ -27,32 +27,40 @@ module MartenStorages
   # list is compile-time fixed, so the *host app* owns the concrete
   # Attachment model with its own `to: [...]` list — the shard just
   # threads queries through whatever class the host names.
+  #
+  # The generated methods delegate to `MartenStorages::Service` so the
+  # query shape lives in one place (review §10 / §11) — extending the
+  # filter chain (e.g. soft-delete) happens in `Service` and the mixin
+  # picks it up for free.
   module Attachable
     macro included
       macro attachment_model(klass)
+        # Compile-time guard (review §12): the macro receives a bare
+        # class name; if the host already loaded the referenced class
+        # (`resolve?` succeeds), assert it's a Marten::DB::Model
+        # subclass so a typo or non-Model class fails at compile time
+        # instead of at the first `filter(...)` runtime call. When the
+        # class isn't yet loaded (forward reference — common with
+        # polymorphic Attachment classes that load *after* their
+        # targets) we let it slide; the generated `\{{ klass.id }}`
+        # invocations will catch a real typo at call-method
+        # type-checking time.
+        \{% if (resolved = klass.resolve?) %}
+          \{% unless resolved <= ::Marten::DB::Model %}
+            \{% raise "attachment_model expected a Marten::DB::Model subclass, got: #{resolved} (#{resolved.class})" %}
+          \{% end %}
+        \{% end %}
+
         def attachments_for(name : ::String) : ::Array(\{{ klass.id }})
-          \{{ klass.id }}
-            .filter(record_type: self.class.name, record_id: pk)
-            .filter(name: name)
-            .filter(variant_of_id: nil)
-            .order(:created_at)
-            .to_a
+          ::MartenStorages::Service.find_many(model: \{{ klass.id }}, record: self, name: name)
         end
 
         def attachment_for(name : ::String) : \{{ klass.id }}?
-          \{{ klass.id }}
-            .filter(record_type: self.class.name, record_id: pk)
-            .filter(name: name)
-            .filter(variant_of_id: nil)
-            .order("-created_at")
-            .first
+          ::MartenStorages::Service.find_one(model: \{{ klass.id }}, record: self, name: name)
         end
 
         def variants_of(attachment : \{{ klass.id }}, kind : ::String) : \{{ klass.id }}?
-          \{{ klass.id }}
-            .filter(variant_of_id: attachment.pk)
-            .filter(variation_kind: kind)
-            .first
+          ::MartenStorages::Service.variant_of(model: \{{ klass.id }}, original: attachment, kind: kind)
         end
       end
     end

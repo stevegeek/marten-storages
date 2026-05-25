@@ -1,6 +1,14 @@
 # Host-defined Attachment row model. Owns the polymorphic `to:` list
 # (compile-time fixed in Marten). Mirrors the shape `Service.attach`
 # expects: name, file, variant_of, variation_kind, content_type, byte_size.
+#
+# Filename note (review §15): the `z_` prefix is *load-order plumbing*.
+# `spec_helper.cr` requires `./test_project/models/**`, which resolves
+# files alphabetically; this file references `Document` and
+# `OtherDocument` in its polymorphic `to: [...]` list and would fail to
+# compile if it loaded before them. The leading `z_` forces it to load
+# last. If you rename it, also rename the require glob or accept the
+# compile error.
 class DocumentAttachment < Marten::Model
   field :id, :big_int, primary_key: true, auto: true
   field :record, :polymorphic, to: [Document, OtherDocument], related: :attachments

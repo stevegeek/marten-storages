@@ -67,21 +67,29 @@ This adds `attachment_for(name)`, `attachments_for(name)` and
 ### 3. Attach files via `Service`
 
 ```crystal
-# Basic attach:
+# Basic attach (pass the form part's Content-Type so it's persisted
+# on the row — `content_type:` defaults to nil for back-compat):
 MartenStorages::Service.attach(
   model: ::Attachment,
   record: book,
   name: "cover",
   uploaded_file: uploaded,
+  content_type: "image/jpeg",
 )
 
-# Attach + generate variants in one call (libvips resize):
+# Attach + generate variants in one call (libvips resize). The
+# variants hash accepts either the legacy NamedTuple shape or the
+# Struct form (`MartenStorages::VariantPipeline::Spec.new(...)`),
+# which also supports a per-variant `format:` override:
 MartenStorages::Service.attach(
   model: ::Attachment,
   record: picture,
   name: "image",
   uploaded_file: uploaded,
-  variants: {"large" => {max_dimension: 1500}},
+  variants: {
+    "large" => MartenStorages::VariantPipeline::Spec.new(max_dimension: 1500),
+    "icon"  => MartenStorages::VariantPipeline::Spec.new(max_dimension: 64, format: "png"),
+  },
 )
 
 # Lookups:
